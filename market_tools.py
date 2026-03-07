@@ -9,8 +9,6 @@ from typing import Any
 import yfinance as yf
 from langchain_core.tools import tool
 
-from rag_pipeline import build_or_load_vectorstore, reranked_top_k
-
 
 @tool
 def get_crypto_prices_usd() -> dict[str, Any]:
@@ -43,14 +41,25 @@ def get_crypto_prices_usd() -> dict[str, Any]:
 def _get_vectorstore():
     # Cache avoids reopening Chroma for every tool call.
     base_dir = Path(__file__).resolve().parent
+    from rag_pipeline import build_or_load_vectorstore
+
     return build_or_load_vectorstore(base_dir / "docs", base_dir / "chroma_db")
 
 
 @tool
 def search_whitepapers(query: str) -> str:
     """Search crypto whitepapers and technical docs for fundamentals and theory."""
-    vectorstore = _get_vectorstore()
-    docs = reranked_top_k(query=query, vectorstore=vectorstore, retrieve_k=12, top_n=3)
+    try:
+        from rag_pipeline import reranked_top_k
+
+        vectorstore = _get_vectorstore()
+        docs = reranked_top_k(query=query, vectorstore=vectorstore, retrieve_k=12, top_n=3)
+    except Exception as exc:
+        return (
+            "Whitepaper search is unavailable in this runtime. "
+            "Python 3.14 has incompatibilities with part of the Chroma stack. "
+            f"Underlying error: {exc}"
+        )
 
     if not docs:
         return "No se encontro informacion relevante en los documentos tecnicos."

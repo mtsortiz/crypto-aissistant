@@ -1,0 +1,35 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local environment variables
+.env
+.env.*
+!.env.example
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local vector DB and runtime artifacts
+chroma_db/
+*.sqlite3
+
+# IDE/editor files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

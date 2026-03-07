@@ -27,7 +27,7 @@ Construir un asistente que pueda:
 
 ### Completado
 
-Se implementaron el **Punto 1 y Punto 2 del Día 1**:
+Se implementaron el **Punto 1, Punto 2 y Punto 3 del Dia 1**:
 
 - `rag_pipeline.py`:
 - Ingesta de PDFs desde `docs/`.
@@ -40,17 +40,22 @@ Se implementaron el **Punto 1 y Punto 2 del Día 1**:
 - Grafo de estado LangGraph para asesor financiero.
 - Estado con `messages` y `needs_market_data`.
 - Flujo implementado: `Start -> Agent -> Tools -> Agent -> End`.
-- LLM: `Gemini 1.5 Pro` (`model="gemini-1.5-pro"`).
+- LLM configurable por entorno con `GOOGLE_MODEL`.
+- Modelo por defecto: `gemini-2.5-flash`.
+- Entrada y salida tipadas con Pydantic (`QueryInput`, `AgentResponse`).
+- Respuesta estandarizada en JSON: `answer`, `sources`, `risk_level`.
 
 - `market_tools.py`:
 - Tool `get_crypto_prices_usd` con `yfinance`.
 - Devuelve precios actuales en USD para `BTC`, `ETH` y `SOL`.
 
+- `main.py`:
+- API FastAPI con endpoint `POST /chat`.
+- Validacion de request/response con Pydantic usando los modelos del agente.
+
 ### Pendiente
 
-- Pydantic end-to-end en entradas/salidas.
-- Respuesta estandarizada del agente en JSON (`answer`, `sources`, `risk_level`).
-- API FastAPI, dockerización y demo.
+- Dockerizacion y demo end-to-end.
 
 ## Estructura del proyecto actual
 
@@ -60,6 +65,7 @@ crypto-agent/
   rag_pipeline.py       # Ingesta + embeddings + Chroma + reranking
   financial_graph.py    # Grafo LangGraph (asesor financiero)
   market_tools.py       # Tool de precios BTC/ETH/SOL
+  main.py               # API FastAPI (/chat)
   requirements.txt      # Dependencias del proyecto
 ```
 
@@ -67,6 +73,7 @@ crypto-agent/
 
 - Python 3.11+
 - Variable de entorno `GOOGLE_API_KEY`
+- (Opcional) `GOOGLE_MODEL` para elegir el modelo Gemini
 
 ## Instalación
 
@@ -98,12 +105,46 @@ py financial_graph.py --question "Should I buy BTC today and what are BTC ETH SO
 
 El agente decide si necesita datos de mercado en tiempo real, llama la tool y vuelve al nodo `Agent` para entregar la respuesta final.
 
+## Uso rápido de la API FastAPI
+
+1. Crear `.env` con tu API key:
+
+```env
+GOOGLE_API_KEY=tu_api_key
+GOOGLE_MODEL=gemini-2.5-flash
+```
+
+2. Levantar API:
+
+```bash
+cd crypto-agent
+py -m uvicorn main:app --env-file .env --host 127.0.0.1 --port 8010
+```
+
+3. Probar endpoint:
+
+```bash
+curl -X POST "http://127.0.0.1:8010/chat" \
+  -H "Content-Type: application/json" \
+  -d "{\"question\":\"precio de BTC y ETH\"}"
+```
+
+Respuesta esperada:
+
+```json
+{
+  "answer": "...",
+  "sources": [],
+  "risk_level": "low|medium|high"
+}
+```
+
 ## Notas técnicas
 
 - Si hay PDFs en `docs/`, el script vuelve a construir el índice y lo persiste.
 - Si no hay PDFs, intenta cargar un índice existente desde `persist_dir`.
 - El reranker se aplica sobre candidatos recuperados de Chroma para mejorar precisión de contexto.
 
-## Próximo paso recomendado
+## Proximo paso recomendado
 
-Implementar el **Punto 3 del Día 1**: tipado y validación con Pydantic en entradas/salidas y formato de respuesta JSON estructurada.
+Avanzar con el **Dia 2**: dockerizacion, compose y demo final end-to-end.
