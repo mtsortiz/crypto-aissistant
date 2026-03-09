@@ -1,0 +1,19 @@
+services:
+  crypto-advisor-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: crypto-advisor-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      GOOGLE_MODEL: ${GOOGLE_MODEL:-gemini-2.5-flash}
+    volumes:
+      - chroma_data:/app/chroma_db
+    restart: unless-stopped
+
+volumes:
+  chroma_data:
