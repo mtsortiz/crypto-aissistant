@@ -32,6 +32,18 @@ async def chat(request: QueryInput) -> AgentResponse:
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        error_text = str(exc)
+        if "RESOURCE_EXHAUSTED" in error_text or "429" in error_text:
+            logger.warning(
+                "Upstream quota exceeded in /chat | request_id=%s | error=%s",
+                request_id,
+                error_text,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="Model quota exceeded. Retry later or lower request volume.",
+            ) from exc
+
         logger.exception(
             "Unhandled error in /chat | request_id=%s",
             request_id,

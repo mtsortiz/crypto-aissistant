@@ -13,6 +13,8 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -31,11 +33,54 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _build_embeddings() -> GoogleGenerativeAIEmbeddings:
+    """Create embeddings client with resilient model selection.
+
+    Different Google API setups can expose the same embedding model with
+    slightly different names, so we try common variants.
+    """
+    preferred_model = os.getenv("GOOGLE_EMBEDDING_MODEL", "models/gemini-embedding-001")
+    raw_candidates = [
+        preferred_model,
+        "models/gemini-embedding-001",
+        "models/text-embedding-004",
+        "text-embedding-004",
+        "models/embedding-001",
+    ]
+
+    candidates: list[str] = []
+    for model_name in raw_candidates:
+        if model_name and model_name not in candidates:
+            candidates.append(model_name)
+
+    last_error: Exception | None = None
+    for model_name in candidates:
+        try:
+            embeddings = GoogleGenerativeAIEmbeddings(model=model_name)
+            # Lightweight probe to fail fast during startup instead of deep in ingestion.
+            embeddings.embed_query("healthcheck")
+            logger.info("Using embedding model: %s", model_name)
+            return embeddings
+        except Exception as exc:  # pragma: no cover - external API variability
+            last_error = exc
+            logger.warning("Embedding model not available: %s", model_name)
+
+    raise RuntimeError(
+        "No compatible Google embedding model found. "
+        "Set GOOGLE_EMBEDDING_MODEL to a valid model for your API key."
+    ) from last_error
+
+
 def _discover_pdf_files(docs_dir: Path) -> list[Path]:
     if not docs_dir.exists():
         logger.warning("Docs directory does not exist: %s", docs_dir)
         return []
     return sorted(docs_dir.glob("*.pdf"))
+
+
+def _has_persisted_store(persist_dir: Path) -> bool:
+    db_file = persist_dir / "chroma.sqlite3"
+    return db_file.exists() and db_file.stat().st_size > 0
 
 
 def load_pdf_documents(docs_dir: Path) -> list[Document]:
@@ -68,35 +113,67 @@ def split_documents(documents: Iterable[Document]) -> list[Document]:
     return chunks
 
 
-def build_or_load_vectorstore(docs_dir: Path, persist_dir: Path) -> Chroma:
+def build_or_load_vectorstore(
+    docs_dir: Path,
+    persist_dir: Path,
+    allow_force_rebuild: bool = True,
+) -> Chroma:
     """Build a persistent Chroma vector store (or load if already present)."""
     if not os.getenv("GOOGLE_API_KEY"):
         raise EnvironmentError("GOOGLE_API_KEY is required to use GoogleGenerativeAIEmbeddings.")
 
     persist_dir.mkdir(parents=True, exist_ok=True)
 
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-004")
+    embeddings = _build_embeddings()
+
+    # Default behavior for runtime queries: load persisted DB to avoid
+    # expensive and quota-heavy re-embedding on every process start.
+    force_rebuild = (
+        allow_force_rebuild
+        and os.getenv("RAG_FORCE_REBUILD", "false").lower() == "true"
+    )
+    if _has_persisted_store(persist_dir) and not force_rebuild:
+        vectorstore = Chroma(
+            persist_directory=str(persist_dir),
+            embedding_function=embeddings,
+        )
+        logger.info("Loaded existing vector store from %s", persist_dir)
+        return vectorstore
 
     documents = load_pdf_documents(docs_dir)
     if documents:
         chunks = split_documents(documents)
-        vectorstore = Chroma.from_documents(
-            documents=chunks,
-            embedding=embeddings,
-            persist_directory=str(persist_dir)
+        if force_rebuild and persist_dir.exists():
+            shutil.rmtree(persist_dir, ignore_errors=True)
+            persist_dir.mkdir(parents=True, exist_ok=True)
+
+        vectorstore = Chroma(
+            persist_directory=str(persist_dir),
+            embedding_function=embeddings,
         )
+
+        # Free-tier embed quotas are strict; index in batches with pauses.
+        batch_size = int(os.getenv("RAG_INDEX_BATCH_SIZE", "80"))
+        pause_seconds = int(os.getenv("RAG_INDEX_BATCH_PAUSE_SECONDS", "65"))
+
+        for start in range(0, len(chunks), batch_size):
+            end = min(start + batch_size, len(chunks))
+            batch = chunks[start:end]
+            vectorstore.add_documents(batch)
+            logger.info("Indexed chunks %s-%s/%s", start + 1, end, len(chunks))
+
+            if end < len(chunks):
+                logger.info("Waiting %ss to respect embedding quota...", pause_seconds)
+                time.sleep(pause_seconds)
+
         if hasattr(vectorstore, "persist"):
             vectorstore.persist()
         logger.info("Vector store built and persisted at %s", persist_dir)
         return vectorstore
 
-    # Fallback to loading an existing persisted DB.
-    vectorstore = Chroma(
-        persist_directory=str(persist_dir),
-        embedding_function=embeddings,
+    raise FileNotFoundError(
+        f"No documents found in {docs_dir} and no persisted Chroma DB in {persist_dir}."
     )
-    logger.info("Loaded existing vector store from %s", persist_dir)
-    return vectorstore
 
 
 def reranked_top_k(query: str, vectorstore: Chroma, retrieve_k: int = 12, top_n: int = 3) -> list[Document]:

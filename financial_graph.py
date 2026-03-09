@@ -7,9 +7,9 @@ Flow:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -48,6 +48,7 @@ def _build_llm() -> ChatGoogleGenerativeAI:
     return ChatGoogleGenerativeAI(
         model=model_name,
         temperature=0.2,
+        max_retries=1,
     )
 
 
@@ -79,6 +80,7 @@ def tools_router(state: AdvisorState) -> str:
     return "tools" if state["needs_market_data"] else END
 
 
+@lru_cache(maxsize=1)
 def build_graph():
     tool_node = ToolNode([get_crypto_prices_usd, search_whitepapers])
 
@@ -123,8 +125,7 @@ def _normalize_sources(sources: list[str]) -> list[str]:
         if source_name:
             normalized.append(f"docs/{source_name}")
 
-    deduped = sorted(set(normalized))
-    return deduped
+    return sorted(set(normalized))
 
 
 def _fallback_risk_level(question: str, answer: str) -> Literal["low", "medium", "high"]:
@@ -139,58 +140,79 @@ def _fallback_risk_level(question: str, answer: str) -> Literal["low", "medium",
     return "low"
 
 
-def _format_structured_response(question: str, answer: str, sources: list[str]) -> AgentResponse:
-    model_name = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
+def _extract_sources_from_tool_text(text: str) -> list[str]:
+    source_pattern = re.compile(r"^Source:\s*(.+)$", re.MULTILINE)
+    raw_sources = [match.strip() for match in source_pattern.findall(text) if match.strip()]
+    return _normalize_sources(raw_sources)
+
+
+def _quota_fallback_response(question: str) -> AgentResponse:
+    question_lc = question.lower()
+
+    # Keep service useful under LLM quota pressure by calling tools directly.
+    if any(term in question_lc for term in ["precio", "price", "btc", "eth", "sol"]):
+        try:
+            market = get_crypto_prices_usd.invoke({})
+            prices = market.get("prices", {}) if isinstance(market, dict) else {}
+        except Exception:
+            prices = {}
+
+        answer = (
+            "No pude usar el modelo de lenguaje por limite de cuota, "
+            "pero estos son los precios actuales en USD: "
+            f"BTC={prices.get('BTC', 'n/a')}, ETH={prices.get('ETH', 'n/a')}, SOL={prices.get('SOL', 'n/a')}. "
+            "Esto no es asesoramiento financiero."
+        )
+        return AgentResponse(answer=answer, sources=[], risk_level="medium")
 
     try:
-        llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.1)
-        structured_llm = llm.with_structured_output(AgentResponse)
-        return structured_llm.invoke(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "Return only structured data. "
-                        "risk_level must be one of: low, medium, high."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "Format this advisor output into structured JSON.\n"
-                        f"Question: {question}\n"
-                        f"Answer: {answer}\n"
-                        f"Sources: {json.dumps(sources, ensure_ascii=True)}"
-                    ),
-                },
-            ]
+        whitepaper = search_whitepapers.invoke({"query": question})
+    except Exception as exc:
+        whitepaper = (
+            "No se pudo consultar whitepapers en este momento. "
+            f"Detalle tecnico: {exc}"
         )
-    except Exception:
-        return AgentResponse(
-            answer=answer,
-            sources=sources,
-            risk_level=_fallback_risk_level(question, answer),
-        )
+
+    sources = _extract_sources_from_tool_text(whitepaper)
+    answer = (
+        "No pude usar el modelo de lenguaje por limite de cuota. "
+        "Te comparto resultados directos de los whitepapers para tu consulta:\n\n"
+        f"{whitepaper}\n\n"
+        "Esto no es asesoramiento financiero."
+    )
+
+    return AgentResponse(
+        answer=answer,
+        sources=sources,
+        risk_level=_fallback_risk_level(question, answer),
+    )
 
 
 def run_query(query: QueryInput) -> AgentResponse:
     app = build_graph()
-    final_state = app.invoke(
-        {
-            "messages": [HumanMessage(content=query.question)],
-            "needs_market_data": False,
-        }
-    )
+    try:
+        final_state = app.invoke(
+            {
+                "messages": [HumanMessage(content=query.question)],
+                "needs_market_data": False,
+            }
+        )
+    except Exception as exc:
+        error_text = str(exc)
+        if "RESOURCE_EXHAUSTED" in error_text or "429" in error_text:
+            return _quota_fallback_response(query.question)
+        raise
 
     final_message = final_state["messages"][-1]
     raw_answer = str(getattr(final_message, "content", "")).strip()
     raw_sources = _extract_sources_from_messages(final_state["messages"])
     normalized_sources = _normalize_sources(raw_sources)
 
-    return _format_structured_response(
-        question=query.question,
+    # Keep JSON shaping local to avoid an extra LLM call per request.
+    return AgentResponse(
         answer=raw_answer,
         sources=normalized_sources,
+        risk_level=_fallback_risk_level(query.question, raw_answer),
     )
 
 
