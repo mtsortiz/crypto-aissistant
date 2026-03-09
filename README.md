@@ -106,6 +106,9 @@ Fallbacks relevantes:
 
 ```text
 crypto-agent/
+  docker/
+    Dockerfile              # Imagen multietapa
+    docker-compose.yml      # Orquestacion local
   docs/                    # Whitepapers PDF para RAG
   chroma_db/               # Persistencia local de Chroma
   main.py                  # FastAPI app
@@ -114,8 +117,6 @@ crypto-agent/
   rag_pipeline.py          # Ingesta, embeddings, indexacion y reranking
   smoke_tests.py           # Pruebas basicas de humo
   requirements.txt         # Dependencias Python
-  Dockerfile               # Imagen multietapa
-  docker-compose.yml       # Orquestacion local
 ```
 
 ## Requisitos
@@ -167,19 +168,19 @@ curl -X POST "http://127.0.0.1:8000/chat" \
 
 ## Ejecucion con Docker
 
-La imagen usa `Dockerfile` multietapa y `docker-compose.yml` con volumen persistente para Chroma.
+La imagen usa `docker/Dockerfile` multietapa y `docker/docker-compose.yml` con volumen persistente para Chroma.
 
 1. Build + up:
 
 ```bash
 cd crypto-agent
-docker compose up --build -d
+docker compose -f docker/docker-compose.yml up --build -d
 ```
 
 2. Ver logs:
 
 ```bash
-docker compose logs -f
+docker compose -f docker/docker-compose.yml logs -f
 ```
 
 3. Probar API:
@@ -193,13 +194,13 @@ curl -X POST "http://127.0.0.1:8000/chat" \
 4. Detener servicio:
 
 ```bash
-docker compose down
+docker compose -f docker/docker-compose.yml down
 ```
 
 5. Limpiar volumen de datos (opcional):
 
 ```bash
-docker compose down -v
+docker compose -f docker/docker-compose.yml down -v
 ```
 
 ## Contrato de la API
