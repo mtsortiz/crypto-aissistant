@@ -1,150 +1,293 @@
 # Crypto Agent
 
-Asistente financiero cripto construido en Python con arquitectura modular, orientado a RAG + agentes con LangGraph + API productizable con FastAPI y Docker.
+Asistente financiero cripto orientado a produccion, construido con Python y una arquitectura modular basada en:
 
-## Objetivo del proyecto
+- LangGraph para orquestacion de decisiones y uso de herramientas.
+- RAG sobre whitepapers PDF (LangChain + Chroma + FlashRank).
+- FastAPI para exponer una API estable (`POST /chat`).
+- Docker y Docker Compose para ejecucion reproducible.
 
-Construir un asistente que pueda:
-- Consultar conocimiento técnico desde documentos (whitepapers en PDF) con RAG.
-- Tomar decisiones de flujo con agentes en LangGraph.
-- Integrar herramientas de mercado (precio BTC/ETH).
-- Exponer un backend robusto para consumo externo.
-- Ejecutarse de forma reproducible en contenedores.
+## Tabla de contenido
 
-## Arquitectura objetivo (roadmap)
+- [Vision general](#vision-general)
+- [Arquitectura](#arquitectura)
+- [Flujo de ejecucion](#flujo-de-ejecucion)
+- [Estructura del repositorio](#estructura-del-repositorio)
+- [Requisitos](#requisitos)
+- [Configuracion](#configuracion)
+- [Ejecucion local](#ejecucion-local)
+- [Ejecucion con Docker](#ejecucion-con-docker)
+- [Contrato de la API](#contrato-de-la-api)
+- [Modulo RAG](#modulo-rag)
+- [Observabilidad y manejo de errores](#observabilidad-y-manejo-de-errores)
+- [Troubleshooting](#troubleshooting)
+- [Roadmap sugerido](#roadmap-sugerido)
 
-- Día 1
-- Módulo RAG (LangChain + Chroma + Embeddings + Reranker).
-- Módulo de agentes con LangGraph.
-- Validación y tipado estricto con Pydantic.
+## Vision general
 
-- Día 2
-- Backend FastAPI (`/chat`).
-- Dockerfile multietapa + `docker-compose` con persistencia.
-- README final y demo end-to-end.
+El proyecto responde preguntas sobre mercado cripto y fundamentos tecnicos usando dos capacidades complementarias:
 
-## Estado actual
+- Datos de mercado en tiempo real para `BTC`, `ETH` y `SOL` via `yfinance`.
+- Recuperacion de conocimiento desde whitepapers PDF en `docs/` mediante RAG.
 
-### Completado
+La respuesta final siempre se normaliza con un esquema consistente:
 
-Se implementaron el **Punto 1, Punto 2 y Punto 3 del Dia 1**:
+```json
+{
+  "answer": "string",
+  "sources": ["string"],
+  "risk_level": "low|medium|high"
+}
+```
 
-- `rag_pipeline.py`:
-- Ingesta de PDFs desde `docs/`.
-- Split con `RecursiveCharacterTextSplitter` (`chunk_size=1000`, `chunk_overlap=100`).
-- Embeddings con `GoogleGenerativeAIEmbeddings`.
-- Vector store persistente con `Chroma` en `chroma_db/`.
-- Reranking con `FlashRank` para top 3 resultados.
+## Arquitectura
 
-- `financial_graph.py`:
-- Grafo de estado LangGraph para asesor financiero.
-- Estado con `messages` y `needs_market_data`.
-- Flujo implementado: `Start -> Agent -> Tools -> Agent -> End`.
-- LLM configurable por entorno con `GOOGLE_MODEL`.
-- Modelo por defecto: `gemini-2.5-flash`.
-- Entrada y salida tipadas con Pydantic (`QueryInput`, `AgentResponse`).
-- Respuesta estandarizada en JSON: `answer`, `sources`, `risk_level`.
+### 1) Capa API
 
-- `market_tools.py`:
-- Tool `get_crypto_prices_usd` con `yfinance`.
-- Devuelve precios actuales en USD para `BTC`, `ETH` y `SOL`.
+- Archivo: `main.py`
+- Framework: FastAPI
+- Endpoint principal: `POST /chat`
+- Validacion tipada con Pydantic (`QueryInput`, `AgentResponse`)
+- Ejecucion del core en threadpool para no bloquear el loop async
 
-- `main.py`:
-- API FastAPI con endpoint `POST /chat`.
-- Validacion de request/response con Pydantic usando los modelos del agente.
+### 2) Capa de orquestacion (Agente)
 
-### Pendiente
+- Archivo: `financial_graph.py`
+- Motor: LangGraph
+- Estado del grafo:
+- `messages`: historial de conversacion
+- `needs_market_data`: bandera para decidir si pasa por herramientas
 
-- Dockerizacion y demo end-to-end.
+Grafo actual:
 
-## Estructura del proyecto actual
+`Start -> Agent -> (Tools | End) -> Agent -> End`
+
+Tools conectadas al agente:
+
+- `get_crypto_prices_usd`
+- `search_whitepapers`
+
+### 3) Capa de herramientas
+
+- Archivo: `market_tools.py`
+
+Herramientas:
+
+- `get_crypto_prices_usd`: consulta cotizaciones en USD de `BTC`, `ETH`, `SOL`.
+- `search_whitepapers`: consulta conocimiento tecnico con RAG y fallback de busqueda por PDF.
+
+### 4) Capa RAG
+
+- Archivo: `rag_pipeline.py`
+- Indexacion de PDFs con:
+- `PyPDFLoader`
+- `RecursiveCharacterTextSplitter` (`chunk_size=1000`, `chunk_overlap=100`)
+- `GoogleGenerativeAIEmbeddings`
+- `Chroma` persistente (`chroma_db/`)
+- Re-ranking con `FlashRank` (`top_n=3`)
+
+## Flujo de ejecucion
+
+1. Cliente envia una pregunta a `POST /chat`.
+2. FastAPI valida payload y llama `run_query`.
+3. El nodo `agent` decide si necesita tools.
+4. Si hay tool calls:
+- Ejecuta `ToolNode`.
+- Retorna al `agent` para redactar respuesta final.
+5. Se normalizan `sources` y se calcula `risk_level` por heuristica local.
+6. API responde JSON estable.
+
+Fallbacks relevantes:
+
+- Si hay `429`/`RESOURCE_EXHAUSTED` del modelo, el sistema intenta responder con tools directas.
+- Si la stack vectorial falla, `search_whitepapers` usa busqueda basica sobre texto de PDFs.
+
+## Estructura del repositorio
 
 ```text
 crypto-agent/
-  docs/                 # PDFs fuente para RAG
-  rag_pipeline.py       # Ingesta + embeddings + Chroma + reranking
-  financial_graph.py    # Grafo LangGraph (asesor financiero)
-  market_tools.py       # Tool de precios BTC/ETH/SOL
-  main.py               # API FastAPI (/chat)
-  requirements.txt      # Dependencias del proyecto
+  docs/                    # Whitepapers PDF para RAG
+  chroma_db/               # Persistencia local de Chroma
+  main.py                  # FastAPI app
+  financial_graph.py       # Grafo LangGraph + modelos Pydantic
+  market_tools.py          # Herramientas de mercado y busqueda documental
+  rag_pipeline.py          # Ingesta, embeddings, indexacion y reranking
+  smoke_tests.py           # Pruebas basicas de humo
+  requirements.txt         # Dependencias Python
+  Dockerfile               # Imagen multietapa
+  docker-compose.yml       # Orquestacion local
 ```
 
 ## Requisitos
 
 - Python 3.11+
-- Variable de entorno `GOOGLE_API_KEY`
-- (Opcional) `GOOGLE_MODEL` para elegir el modelo Gemini
+- Docker Desktop (opcional, para ejecucion contenedorizada)
+- Clave valida para Gemini:
+- `GOOGLE_API_KEY`
 
-## Instalación
+## Configuracion
+
+Crear un archivo `.env` en la raiz de `crypto-agent/`:
+
+```env
+GOOGLE_API_KEY=tu_api_key
+GOOGLE_MODEL=gemini-2.5-flash
+
+# Opcional: modelo de embeddings
+GOOGLE_EMBEDDING_MODEL=models/gemini-embedding-001
+
+# Opcional: controlar reconstruccion del indice
+RAG_FORCE_REBUILD=false
+RAG_INDEX_BATCH_SIZE=80
+RAG_INDEX_BATCH_PAUSE_SECONDS=65
+```
+
+## Ejecucion local
+
+1. Instalar dependencias:
 
 ```bash
 cd crypto-agent
 py -m pip install -r requirements.txt
 ```
 
-## Uso rápido del módulo RAG
-
-1. Colocar PDFs en `docs/`.
-2. Construir/actualizar índice vectorial persistente:
-
-```bash
-py rag_pipeline.py --docs-dir ./docs --persist-dir ./chroma_db
-```
-
-3. Ejecutar una consulta de prueba con reranking top 3:
-
-```bash
-py rag_pipeline.py --docs-dir ./docs --persist-dir ./chroma_db --query "What is Proof of Work in Bitcoin?"
-```
-
-## Uso rápido del módulo LangGraph (Día 1 - Punto 2)
-
-```bash
-py financial_graph.py --question "Should I buy BTC today and what are BTC ETH SOL prices now?"
-```
-
-El agente decide si necesita datos de mercado en tiempo real, llama la tool y vuelve al nodo `Agent` para entregar la respuesta final.
-
-## Uso rápido de la API FastAPI
-
-1. Crear `.env` con tu API key:
-
-```env
-GOOGLE_API_KEY=tu_api_key
-GOOGLE_MODEL=gemini-2.5-flash
-```
-
 2. Levantar API:
 
 ```bash
-cd crypto-agent
-py -m uvicorn main:app --env-file .env --host 127.0.0.1 --port 8010
+py -m uvicorn main:app --env-file .env --host 127.0.0.1 --port 8000
 ```
 
 3. Probar endpoint:
 
 ```bash
-curl -X POST "http://127.0.0.1:8010/chat" \
+curl -X POST "http://127.0.0.1:8000/chat" \
   -H "Content-Type: application/json" \
-  -d "{\"question\":\"precio de BTC y ETH\"}"
+  -d '{"question":"precio de BTC y ETH"}'
 ```
 
-Respuesta esperada:
+## Ejecucion con Docker
+
+La imagen usa `Dockerfile` multietapa y `docker-compose.yml` con volumen persistente para Chroma.
+
+1. Build + up:
+
+```bash
+cd crypto-agent
+docker compose up --build -d
+```
+
+2. Ver logs:
+
+```bash
+docker compose logs -f
+```
+
+3. Probar API:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"explica proof of work"}'
+```
+
+4. Detener servicio:
+
+```bash
+docker compose down
+```
+
+5. Limpiar volumen de datos (opcional):
+
+```bash
+docker compose down -v
+```
+
+## Contrato de la API
+
+### Endpoint
+
+- Metodo: `POST`
+- Ruta: `/chat`
+- Content-Type: `application/json`
+
+### Request
+
+```json
+{
+  "question": "Should I buy BTC today?"
+}
+```
+
+Regla de validacion:
+
+- `question` es obligatorio y no puede ser vacio.
+
+### Response 200
 
 ```json
 {
   "answer": "...",
-  "sources": [],
-  "risk_level": "low|medium|high"
+  "sources": ["docs/bitcoin.pdf"],
+  "risk_level": "medium"
 }
 ```
 
-## Notas técnicas
+### Errores
 
-- Si hay PDFs en `docs/`, el script vuelve a construir el índice y lo persiste.
-- Si no hay PDFs, intenta cargar un índice existente desde `persist_dir`.
-- El reranker se aplica sobre candidatos recuperados de Chroma para mejorar precisión de contexto.
+- `400`: error de validacion o runtime controlado.
+- `429`: cuota del modelo agotada.
+- `500`: error interno no controlado.
 
-## Proximo paso recomendado
+## Modulo RAG
 
-Avanzar con el **Dia 2**: dockerizacion, compose y demo final end-to-end.
+### Construir o actualizar indice
+
+```bash
+py rag_pipeline.py --docs-dir ./docs --persist-dir ./chroma_db
+```
+
+### Probar consulta RAG por CLI
+
+```bash
+py rag_pipeline.py --docs-dir ./docs --persist-dir ./chroma_db --query "What is Proof of Work in Bitcoin?"
+```
+
+### Notas operativas
+
+- Si existe `chroma_db/chroma.sqlite3` y `RAG_FORCE_REBUILD=false`, se reutiliza el indice.
+- La indexacion se hace en lotes para reducir riesgo de exceder cuota de embeddings.
+- `search_whitepapers` intenta usar RAG y, si falla, aplica fallback por lectura directa de PDF.
+
+## Observabilidad y manejo de errores
+
+- Logging estructurado en `main.py` con `request_id` por llamada.
+- Manejo explicito de errores de cuota (`429`) y errores internos (`500`).
+- Respuesta de degradacion controlada cuando el LLM no esta disponible por cuota.
+
+## Troubleshooting
+
+### Error: `GOOGLE_API_KEY is required`
+
+- Verificar archivo `.env` y variable exportada en entorno.
+
+### Error: no responde Docker Desktop
+
+- Confirmar que Docker Desktop esta iniciado.
+- Validar con `docker version` que el daemon este disponible.
+
+### No aparecen fuentes en `sources`
+
+- Verificar que existan PDFs en `docs/`.
+- Reconstruir indice con `rag_pipeline.py`.
+
+### RAG lento al inicio
+
+- Primer build puede tardar por embeddings e indexacion.
+- Siguientes corridas reutilizan `chroma_db/`.
+
+## Roadmap sugerido
+
+- Agregar tests unitarios por modulo (tools, parser de sources, heuristica de riesgo).
+- Agregar evaluacion automatizada de respuestas (quality harness).
+- Exponer metricas (latencia, tasa de errores, fallback ratio).
+- Implementar autenticacion y rate limiting para entorno productivo.
