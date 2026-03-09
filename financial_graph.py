@@ -216,17 +216,62 @@ def run_query(query: QueryInput) -> AgentResponse:
     )
 
 
+def export_graph_image(output_path: str = "workflow_graph.png") -> str:
+    app = build_graph()
+    graph = app.get_graph()
+
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Prefer local rendering first.
+        png_bytes = graph.draw_png(output_file_path=str(output_file))
+        if png_bytes and not output_file.exists():
+            output_file.write_bytes(png_bytes)
+        return str(output_file)
+    except Exception as png_error:
+        try:
+            # Fallback to Mermaid API rendering when local renderer is unavailable.
+            png_bytes = graph.draw_mermaid_png(output_file_path=str(output_file))
+            if png_bytes and not output_file.exists():
+                output_file.write_bytes(png_bytes)
+            return str(output_file)
+        except Exception as mermaid_error:
+            raise RuntimeError(
+                "Could not render graph image. "
+                "Local Graphviz rendering and Mermaid API rendering both failed. "
+                f"draw_png error: {png_error}; draw_mermaid_png error: {mermaid_error}"
+            ) from mermaid_error
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Crypto financial advisor with LangGraph")
-    parser.add_argument("--question", required=True, help="User question for the advisor")
+    parser.add_argument("--question", help="User question for the advisor")
+    parser.add_argument(
+        "--export-graph",
+        nargs="?",
+        const="workflow_graph.png",
+        metavar="PATH",
+        help="Export the LangGraph workflow as PNG. Default path: workflow_graph.png",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    query = QueryInput(question=args.question)
-    result = run_query(query)
-    print(result.model_dump_json(indent=2))
+
+    if args.export_graph:
+        output = export_graph_image(args.export_graph)
+        print(f"Graph image generated: {output}")
+
+    if args.question:
+        query = QueryInput(question=args.question)
+        result = run_query(query)
+        print(result.model_dump_json(indent=2))
+        return
+
+    if not args.export_graph:
+        raise SystemExit("Use --question and/or --export-graph")
 
 
 if __name__ == "__main__":
