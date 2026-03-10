@@ -22,6 +22,7 @@ Asistente financiero cripto orientado a produccion, construido con Python y una 
 - [Observabilidad y manejo de errores](#observabilidad-y-manejo-de-errores)
 - [Troubleshooting](#troubleshooting)
 - [Roadmap sugerido](#roadmap-sugerido)
+- [Grafo resultante](#grafo-resultante)
 
 ## Vision general
 
@@ -292,3 +293,9 @@ py rag_pipeline.py --docs-dir ./docs --persist-dir ./chroma_db --query "What is 
 - Agregar evaluacion automatizada de respuestas (quality harness).
 - Exponer metricas (latencia, tasa de errores, fallback ratio).
 - Implementar autenticacion y rate limiting para entorno productivo.
+
+## Grafo resultante
+
+Diagrama final del workflow generado por el proyecto:
+
+![Grafo financiero del proyecto](graph/financial_workflow.png)
